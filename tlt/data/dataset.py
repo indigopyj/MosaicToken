@@ -92,9 +92,9 @@ class DatasetTokenLabel(data.Dataset):
         img = open(path, 'rb').read() if self.load_bytes else Image.open(path).convert('RGB')
         score_maps = torch.load(score_path).float()
         if self.transform is not None:
-            img, score_maps = self.transform(img, score_maps)
+            img, score_maps = self.transform(img, score_maps) # [2,5,18,18] : [0,0,:,:] top 1의 value, [1,0,:,:] top 1의 index
         # append ground truth after coords
-        score_maps[-1,0,0,5]=target
+        score_maps[-1,0,0,5]=target  #[3,5,18,18]
         return img, score_maps
 
     def __len__(self):

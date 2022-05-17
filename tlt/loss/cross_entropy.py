@@ -1,3 +1,4 @@
+from fcntl import DN_DELETE
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -54,27 +55,57 @@ class TokenLabelCrossEntropy(nn.Module):
 
 
     def forward(self, x, target):
-
-        output, aux_output, bb = x
-        bbx1, bby1, bbx2, bby2 = bb
+        output, aux_output, bb = x # dist_output is not used, output shape: [B, 1000]
+        if len(bb) == 2:
+            cx, cy = bb
+        else:
+            bbx1, bby1, bbx2, bby2 = bb
 
         B,N,C = aux_output.shape
-        if len(target.shape)==2:
+        if len(target.shape)==2: # target : [B, 1000, 198] 
             target_cls=target
             target_aux = target.repeat(1,N).reshape(B*N,C)
-        else: 
-            target_cls = target[:,:,1]
-            if self.ground_truth:
+        else: # default
+            target_cls = target[:,:,1] # [:,:,0] : gt, [B, 1000, 1]: cls token, 
+            if self.ground_truth: # default == False
                 # use ground truth to help correct label.
                 # rely more on ground truth if target_cls is incorrect.
-                ground_truth = target[:,:,0]
+                ground_truth = target[:,:,0] 
                 ratio = (0.9 - 0.4 * (ground_truth.max(-1)[1] == target_cls.max(-1)[1])).unsqueeze(-1)
                 target_cls = target_cls * ratio + ground_truth * (1 - ratio)
-            target_aux = target[:,:,2:]
+            target_aux = target[:,:,2:] # target label for tokens 
             target_aux = target_aux.transpose(1,2).reshape(-1,C)
-        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / N)
-        if lam<1:
-            target_cls = lam*target_cls + (1-lam)*target_cls.flip(0)
+        if len(bb) == 2:
+            patch_size = math.sqrt(N)
+            lam1 = cx * cy / N
+            lam2 = (patch_size - cx) * cy / N
+            lam3 = (patch_size - cy) * cx / N
+            left_tensors = None
+            try:
+                target_cls_split = torch.stack([target_cls[i:i+4, :] for i in range(0, target_cls.shape[0], 4)], 0) # shape: [B/4, 4, 1000, 1]
+            except:
+                target_cls_split = torch.stack([target_cls[i:i+4, :] for i in range(0, target_cls.shape[0]-3, 4)], 0)
+                left_tensors = target_cls_split[target_cls.shape[0]-3:]
+            target_cls_stack = None
+            for i in range(target_cls_split.shape[0]):
+                target_tensor = target_cls_split[i]
+                t1 = target_tensor
+                t2 = target_tensor[[1,2,3,0], :]
+                t3 = target_tensor[[2,3,0,1], :]
+                t4 = target_tensor[[3,0,1,2], :]
+                target_cls_tmp = lam1 * t1 + lam2 * t2 + lam3 * t3 + (1 - lam1 - lam2 - lam3) * t4 # [4, 1000]
+                if i == 0:
+                    target_cls_stack = target_cls_tmp
+                else:
+                    target_cls_stack = torch.cat([target_cls_stack, target_cls_tmp], 0)
+            
+            if left_tensors is not None:
+                target_cls_stack = torch.cat([target_cls_stack, left_tensors], 0) # [B, 1000, 1]
+            target_cls = target_cls_stack.cuda()
+        else:
+            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / N)
+            if lam<1:
+                target_cls = lam*target_cls + (1-lam)*target_cls.flip(0)
 
         aux_output = aux_output.reshape(-1,C)
         loss_cls = self.CE(output, target_cls)

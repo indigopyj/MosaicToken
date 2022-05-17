@@ -168,6 +168,7 @@ class LV_ViT(nn.Module):
     def forward_embeddings(self,x):
         x = self.patch_embed(x)
         return x
+    
     def forward_tokens(self, x):
         B = x.shape[0]
         cls_tokens = self.cls_token.expand(B, -1, -1)

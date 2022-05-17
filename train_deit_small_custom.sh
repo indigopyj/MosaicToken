@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=5,7 python main.py /home/nas1_userB/dataset/ImageNet2012 --model deit_small_custom -b 256 --img-size 224 --drop-path 0.1 --token-label --token-label-data ../label_top5_train_nfnet --token-label-size 14 --model-ema

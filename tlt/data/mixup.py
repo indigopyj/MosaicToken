@@ -38,7 +38,7 @@ def get_label(label_maps, batch_coords,label_size=1,device='cuda'):
                 [torch.arange(num_batches).view(num_batches,
                                                 1).float().to(device),
                  batch_coords.float() * label_maps.size(3) - 0.5], 1),
-            output_size=(1, 1))
+            output_size=(1, 1)) # shape : [B, 1000, 1, 1]
         B,C,H,W = target_label.shape
         target_label = target_label.view(B,C,H*W)
         target_label = torch.cat([target_label_cls.view(B,C,1),target_label],dim=2)
@@ -56,18 +56,18 @@ def get_labelmaps_with_coords(label_maps_topk, num_classes, on_value=1., off_val
     random_crop_coords = random_crop_coords.to(device)
 
     # trick to get ground truth from label_map
-    ground_truth = label_maps_topk[:,2,0,0,5].view(-1).to(dtype=torch.int64)
-    ground_truth = one_hot(ground_truth, num_classes, on_value=on_value, off_value=off_value, device=device)
+    ground_truth = label_maps_topk[:,2,0,0,5].view(-1).to(dtype=torch.int64) # shape : [B,1]
+    ground_truth = one_hot(ground_truth, num_classes, on_value=on_value, off_value=off_value, device=device) # shape = [B, 1000]
 
     # get full label maps from raw topk labels
     label_maps = get_featuremaps(label_maps_topk=label_maps_topk,
-                               num_classes=num_classes,device=device)
+                               num_classes=num_classes,device=device) # shape : [B, 1000, 18, 18]
 
     # get token-level label and ground truth
     token_label = get_label(label_maps=label_maps,
                           batch_coords=random_crop_coords,
                           label_size=label_size,
-                          device=device)
+                          device=device) # shape: [B, 1000, 14*14 + 1(cls token)]
     B,C = token_label.shape[:2]
     token_label = token_label*on_value+off_value
     if label_size==1:

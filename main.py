@@ -28,6 +28,9 @@ import tlt.models
 from tlt.data import create_token_label_target, TokenLabelMixup, FastCollateTokenLabelMixup, create_token_label_loader, create_token_label_dataset
 from tlt.loss import TokenLabelCrossEntropy, TokenLabelSoftTargetCrossEntropy
 from tlt.utils import load_pretrained_weights
+from tensorboardX import SummaryWriter
+# tensorboard
+writer = SummaryWriter(logdir='./tensorboard')
 
 
 try:
@@ -282,6 +285,10 @@ parser.add_argument('--finetune', default='', type=str, metavar='PATH',
                     help='path to checkpoint file (default: none)')
 
 
+# custom option
+parser.add_argument("--mosaic", action="store_true")
+
+
 def _parse_args():
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -323,6 +330,11 @@ def main():
     assert args.rank >= 0
 
     # resolve AMP arguments based on PyTorch / Apex availability
+    # setting for deit default
+    args.amp = True
+    args.native_amp = True
+    
+    
     use_amp = None
     if args.amp:
         # `--amp` chooses native amp before apex (APEX ver not actively maintained)
@@ -338,6 +350,8 @@ def main():
         _logger.warning("Neither APEX or native Torch AMP is available, using float32. "
                         "Install NVIDA apex or upgrade to PyTorch 1.6")
 
+
+    
     torch.manual_seed(args.seed + args.rank)
     np.random.seed(args.seed + args.rank)
     model = create_model(
@@ -446,12 +460,12 @@ def main():
             # Apex DDP preferred unless native amp is activated
             if args.local_rank == 0:
                 _logger.info("Using NVIDIA APEX DistributedDataParallel.")
-            model = ApexDDP(model, delay_allreduce=True)
+            model = ApexDDP(model, delay_allreduce=True, find_unused_parameters=True)
         else:
             if args.local_rank == 0:
                 _logger.info("Using native Torch DistributedDataParallel.")
-            model = NativeDDP(model, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
-        # NOTE: EMA model does not need to be wrapped by DDP
+            model = NativeDDP(model, find_unused_parameters=True, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
+        # NOTE: EMA model does not need to be wrapped by DDP    
 
     # setup learning rate schedule and starting epoch
     lr_scheduler, num_epochs = create_scheduler(args, optimizer)
@@ -482,13 +496,13 @@ def main():
     collate_fn = None
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    if mixup_active:
+    if mixup_active: # no acccess
         mixup_args = dict(
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.num_classes)
         # create token_label mixup
-        if args.token_label_data:
+        if args.token_label_data: 
             mixup_args['label_size']=args.token_label_size
             if args.prefetcher:
                 assert not num_aug_splits
@@ -563,10 +577,10 @@ def main():
 
     # use token_label loss
     if args.token_label:
-        if args.token_label_size==1:
+        if args.token_label_size==1: 
             # back to relabel/original ImageNet label
             train_loss_fn = TokenLabelSoftTargetCrossEntropy().cuda()
-        else:
+        else: # default 14
             train_loss_fn = TokenLabelCrossEntropy(dense_weight=args.dense_weight,\
                 cls_weight = args.cls_weight, mixup_active = mixup_active, ground_truth=args.ground_truth).cuda()
 
@@ -609,13 +623,19 @@ def main():
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
                 amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn, optimizers=optimizers)
 
+            writer.add_scalar("train/loss", train_metrics['loss'], epoch)
+            
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
                     _logger.info("Distributing BatchNorm running means and vars")
                 distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
 
             eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
-
+            
+            writer.add_scalar("test/loss", eval_metrics['loss'], epoch)
+            writer.add_scalar("test/Acc@1", eval_metrics['top1'], epoch)
+            writer.add_scalar("test/Acc@5", eval_metrics['top5'], epoch)
+            
             if model_ema is not None and not args.model_ema_force_cpu:
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
@@ -630,6 +650,14 @@ def main():
             update_summary(
                 epoch, train_metrics, eval_metrics, os.path.join(output_dir, 'summary.csv'),
                 write_header=best_metric is None)
+            
+            # tensorboard
+            
+            writer.add_scalar("test(ema)/loss", eval_metrics['loss'], epoch)
+            writer.add_scalar("test(ema)/Acc@1", eval_metrics['top1'], epoch)
+            writer.add_scalar("test(ema)/Acc@5", eval_metrics['top5'], epoch)
+            
+            
 
             if saver is not None:
                 # save proper checkpoint with eval metric
@@ -657,6 +685,8 @@ def train_one_epoch(
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
+    
+    loss_list = []
 
     model.train()
 
@@ -678,7 +708,7 @@ def train_one_epoch(
                 if len(target.shape)==1:
                     target=create_token_label_target(target,num_classes=args.num_classes,
                         smoothing=args.smoothing)
-        else:
+        else: # default
             if args.token_label and args.token_label_data and not loader.mixup_enabled:
                 target=create_token_label_target(target,num_classes=args.num_classes,
                     smoothing=args.smoothing, label_size=args.token_label_size)
@@ -688,7 +718,7 @@ def train_one_epoch(
         if args.channels_last:
             input = input.contiguous(memory_format=torch.channels_last)
 
-        with amp_autocast():
+        with amp_autocast(): # input : [batch, 3, 224, 224] target: [batch, 1000, 198]
             output = model(input)
             loss = loss_fn(output, target)
 
@@ -741,6 +771,9 @@ def train_one_epoch(
                         rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
                         lr=lr,
                         data_time=data_time_m))
+                
+                # tensorboard
+                loss_list += [losses_m]
 
                 if args.save_images and output_dir:
                     torchvision.utils.save_image(
@@ -827,6 +860,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
                         loss=losses_m, top1=top1_m, top5=top5_m))
 
     metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
+    
 
     return metrics
 
